@@ -34,7 +34,7 @@
 <div class="sub">PAI 最終課題 説明資料　／　omnicampus アカウント名: <span class="todo">［要記入］</span></div>
 
 <table class="meta">
-  <tr><td>GitHub</td><td><span class="todo">［リポジトリ URL］</span></td></tr>
+  <tr><td>GitHub</td><td>https://github.com/Rinnnnnnnnnnnnnnnnnnnnn/PAI_final</td></tr>
   <tr><td>動画（YouTube）</td><td><span class="todo">［動画 URL］</span>（2 倍速再生）</td></tr>
   <tr><td>実行環境</td><td>Google Colab（データ作成: CPU ランタイム／学習・評価・動画: GPU ランタイム A100）</td></tr>
 </table>
@@ -142,10 +142,31 @@
 </table>
 <p>テンプレート別の成功率: <span class="todo">［ eval_by_template_exp1.png を貼る ］</span></p>
 
+<h3>6.3 提出動画でのデモ（生徒：Qwen2.5-Coder-7B-Instruct + LoRA）</h3>
+<p>学習に使っていない seed（100000 番台）で、テンプレートごとに 1 タスクずつと、学習テンプレートに無い自由な指示 2 つを実行しました（動画は 1 分 23 秒、2 倍速）。
+<b>自動判定できる 9 タスクのうち、8 タスクで成功</b>しました。</p>
+<table>
+  <tr><th>#</th><th>テンプレート</th><th>指示</th><th>結果</th><th class="num">生成時間</th></tr>
+  <tr><td>1</td><td>block_on_bowl</td><td>put the cyan block on the green bowl</td><td>○ 成功</td><td class="num">3.9 秒</td></tr>
+  <tr><td>2</td><td>color_alias</td><td>put the sun-colored block on the brown bowl</td><td>○ 成功（sun-colored → yellow と解釈）</td><td class="num">2.0 秒</td></tr>
+  <tr><td>3</td><td>corner</td><td>move the orange block to the top right corner</td><td>○ 成功</td><td class="num">4.9 秒</td></tr>
+  <tr><td>4</td><td>closest_bowl</td><td>put the yellow block in the bowl closest to it</td><td>○ 成功</td><td class="num">13.0 秒</td></tr>
+  <tr><td>5</td><td>extreme_block</td><td>put the left most block on the green bowl</td><td>○ 成功</td><td class="num">11.5 秒</td></tr>
+  <tr><td>6</td><td>side_of</td><td>put the gray block to the right of the red bowl</td><td>○ 成功</td><td class="num">8.0 秒</td></tr>
+  <tr><td>7</td><td>matching</td><td>put each block in the bowl of the same color</td><td>× 失敗（TypeError）</td><td class="num">7.4 秒</td></tr>
+  <tr><td>8</td><td>stack</td><td>stack all the blocks on the green bowl</td><td>○ 成功</td><td class="num">10.5 秒</td></tr>
+  <tr><td>9</td><td>count</td><td>how many blocks are there?</td><td>○ 成功（"there are 4 blocks"）</td><td class="num">7.0 秒</td></tr>
+  <tr><td>10</td><td>学習外</td><td>put the red block in the bowl farthest from it</td><td>△ 自動判定なし。妥当なコードを生成し、実行もできた</td><td class="num">12.1 秒</td></tr>
+  <tr><td>11</td><td>学習外</td><td>put the blocks in a horizontal line near the bottom side</td><td>× 映像で確認（横に並べずに、積み上げてしまった）</td><td class="num">8.7 秒</td></tr>
+</table>
+<p class="small">生成時間は、1 タスクの中で行われた全 LMP 呼び出し（下位 LMP・関数生成を含む）のコード生成時間の合計です。</p>
+
 <h2>7. 考察と今後の課題</h2>
-<p><span class="todo">［ 結果の数値を見てから記入：生徒が教師に近づけたテンプレート／苦手なテンプレートとその原因（失敗エピソードのエラー内容から）、速度の差 ］</span></p>
+<p><span class="todo">［ 評価 30 エピソードの数値を見てから、教師との成功率・速度の差について追記 ］</span></p>
 <ul>
-  <li><b>汎化の限界</b>：生徒が覚えたのは、9 種類のテンプレートに沿った書き方です。「三角形に並べる」のように学習データに無い種類の指示は苦手だと考えられるので、動画の最後で学習外の指示を試しています。</li>
+  <li><b>few-shot 例なしでも CaP の構造を再現できた</b>：生徒は、指示に応じて <code>parse_obj_name</code>・<code>parse_position</code>・<code>parse_question</code> などの下位 LMP を呼び分け、<code>get_obj_positions_np</code> のような未定義関数を <code>fgen</code> に作らせていました。教師の階層的なコード生成のやり方が、プロンプトではなく重みとして身についたといえます。色の言い換え（sun-colored → yellow）のような言語的な推論もできていました。</li>
+  <li><b>失敗の原因は API の誤用</b>：matching では、生徒が存在しない引数をつけて <code>get_obj_names('blocks')</code> と呼んだため、TypeError で止まりました。教師は few-shot 例で API の正しい使い方をその都度見られますが、生徒は短い入力しか見ないため、API の仕様を間違えて覚えると誤りがそのまま出てしまいます。対策としては、利用できる API の一覧（シグネチャ）を生徒の入力に短く入れることや、このパターンの学習データを増やすことが考えられます。</li>
+  <li><b>汎化の限界</b>：学習外の「一番遠いボウル」では、closest_bowl のコード（距離でソートして先頭を選ぶ）を末尾 <code>[-1]</code> に変えた、妥当なコードを書けました。一方で「横一列に並べる」では、stack テンプレートの書き方をそのまま当てはめて積み上げてしまいました。<b>学習したパターンを少し変えるのは得意だが、新しい種類の動作は苦手</b>という、蒸留の特徴がそのまま出た結果です。</li>
   <li><b>データの多様化</b>：Gemini に指示文の言い換えを作らせたり、温度を上げて同じタスクを複数回解かせたりすれば、学習データの多様性を増やせます。</li>
   <li><b>失敗データの活用</b>：今回は捨てた失敗エピソードを「悪い例」として、DPO などの選好学習に使えます。</li>
 </ul>
