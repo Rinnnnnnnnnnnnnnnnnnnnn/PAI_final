@@ -36,7 +36,7 @@ PAI 最終課題のコード一式です。
 ## 提出物
 
 - 説明資料：`report/`
-- 動画（YouTube）：（URL を追記）
+- 動画（YouTube）：https://youtu.be/kXr9rSQjUgc （2 倍速再生）
 
 ## ライセンス
 
