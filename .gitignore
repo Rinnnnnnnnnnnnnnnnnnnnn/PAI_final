@@ -1,0 +1,20 @@
+# API キーなどの秘密情報
+.env
+.env.*
+
+# Colab / ローカル実行で作られる実験データ・モデル・動画
+cap_distill/
+*.mp4
+*.zip
+ur5e/
+robotiq_2f_85/
+bowl/
+
+# レポートの PDF は完成版だけを手動で追加する
+report/*.pdf
+
+# Python / Jupyter
+__pycache__/
+.ipynb_checkpoints/
+.venv/
+venv/

@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>PAI最終課題 説明資料</title>
+<style>
+  @page { size: A4; margin: 16mm 16mm 16mm 16mm; }
+  :root { --ink:#1d1f24; --dim:#5b6070; --line:#d5d8df; --accent:#2557c7; --soft:#f2f5fb; --todo:#fff2c2; }
+  body { font-family: "Yu Gothic", "YuGothic", "Meiryo", "Noto Sans CJK JP", sans-serif; color: var(--ink);
+         background:#fff; font-size: 10.2pt; line-height: 1.65; margin: 0; }
+  h1 { font-size: 18pt; margin: 0 0 2mm; line-height: 1.35; }
+  .sub { color: var(--dim); margin-bottom: 5mm; font-size: 9.5pt; }
+  h2 { font-size: 12.5pt; margin: 6mm 0 2mm; padding-bottom: 1mm; border-bottom: 2px solid var(--accent); break-after: avoid; }
+  h3 { font-size: 10.8pt; margin: 4mm 0 1.5mm; break-after: avoid; }
+  p { margin: 1.5mm 0; }
+  ul, ol { margin: 1.5mm 0; padding-left: 6mm; }
+  li { margin: 0.6mm 0; }
+  table { border-collapse: collapse; width: 100%; margin: 2mm 0; font-size: 9.2pt; break-inside: avoid; }
+  th, td { border: 1px solid var(--line); padding: 1.2mm 2mm; text-align: left; vertical-align: top; }
+  th { background: var(--soft); }
+  td.num { text-align: right; }
+  code { font-family: Consolas, "DejaVu Sans Mono", monospace; font-size: 8.8pt; background: var(--soft); padding: 0 1mm; border-radius: 1mm; }
+  pre { font-family: Consolas, monospace; font-size: 8.3pt; background: var(--soft); padding: 2mm 3mm; border-radius: 1.5mm;
+        line-height: 1.45; margin: 2mm 0; break-inside: avoid; white-space: pre; }
+  .todo { background: var(--todo); padding: 0 1mm; border-radius: 1mm; }
+  .box { border: 1px solid var(--line); border-left: 4px solid var(--accent); padding: 2mm 3mm; margin: 2mm 0; background: #fafbfd; break-inside: avoid; }
+  .meta td:first-child { width: 32mm; background: var(--soft); font-weight: bold; }
+  .small { font-size: 8.8pt; color: var(--dim); }
+</style>
+</head>
+<body>
+
+<h1>Code as Policies の蒸留<br>— Gemini を教師にして、小型モデルにロボット制御コードを書かせる —</h1>
+<div class="sub">PAI 最終課題 説明資料　／　omnicampus アカウント名: <span class="todo">［要記入］</span></div>
+
+<table class="meta">
+  <tr><td>GitHub</td><td><span class="todo">［リポジトリ URL］</span></td></tr>
+  <tr><td>動画（YouTube）</td><td><span class="todo">［動画 URL］</span>（2 倍速再生）</td></tr>
+  <tr><td>実行環境</td><td>Google Colab（データ作成: CPU ランタイム／学習・評価・動画: GPU ランタイム A100）</td></tr>
+</table>
+
+<h2>1. 課題の概要</h2>
+<p>
+<b>Code as Policies（CaP, Liang et al., 2022）</b>は、大規模言語モデル（LLM）に few-shot 例を見せて、自然言語の指示から
+<b>ロボットを動かす Python コード</b>を書かせる手法です。生成したコードをその場で実行すると、ロボットが動きます。
+本課題では、公式の卓上マニピュレーションデモ（PyBullet 上の UR5e アームと 2 指グリッパーで、ブロックとボウルを動かす）を題材にして、次の 2 段階で取り組みました。
+</p>
+<ol>
+  <li><b>CaP を Gemini API で動かす</b>：元の実装で使われていた OpenAI <code>text-davinci-003</code> は提供が終わっているため、Gemini で動くように書き直しました。</li>
+  <li><b>CaP の蒸留</b>：Gemini 版 CaP を「教師」にして教師データを自動で作り、手元の GPU で動く小型のコード生成モデル（生徒：<b>Qwen2.5-Coder-Instruct</b>）を LoRA でファインチューニングしました。生徒は <b>few-shot 例なしの短い入力だけ</b>でロボット制御コードを書きます。</li>
+</ol>
+
+<h2>2. 目的</h2>
+<p>CaP は few-shot プロンプトが数千トークンあり、指示のたびに外部 API へ長いプロンプトを送ります。そのため、料金・レート制限・応答の遅さが問題になります。そこで、次の 3 点を調べることにしました。</p>
+<ul>
+  <li>教師（Gemini＋few-shot）の振る舞いを、<b>小型モデルの重み</b>に覚えさせられるか</li>
+  <li>生徒は、教師と比べてどのくらいの<b>成功率</b>と<b>速さ</b>でタスクをこなせるか</li>
+  <li>学習したタスクの外の指示に、生徒はどこまで<b>汎化</b>するか</li>
+</ul>
+
+<h2>3. システム構成</h2>
+<p>CaP は役割の異なる複数の LMP（Language Model Program ＝ LLM ＋ プロンプト ＋ 実行環境）が、お互いを関数として呼び合う構成になっています。</p>
+<pre>
+ 指示 "put the red block in the bowl closest to it"
+   │
+   ▼
+ tabletop_ui (LMP) ── 指示 → ロボット操作コード（say / put_first_on_second など）
+   ├─► parse_obj_name      "一番近いボウル" → 'blue bowl'
+   ├─► parse_position      "〜の左 10cm" → 座標 [x, y]
+   ├─► parse_question      "ブロックは何個？" → 答え
+   ├─► transform_shape_pts 図形の拡大・回転
+   └─► fgen（LMPFGen）     コード中の未定義関数（get_closest_idx など）の本体を生成
+                                  │
+                                  ▼
+                 PyBullet：UR5e + Robotiq 2F-85 で Pick &amp; Place
+</pre>
+<p>蒸留では、LMP が「誰にコードを書かせるか」を差し替えられるようにしました（バックエンド）。教師バックエンドは few-shot プロンプト全体を Gemini に渡し、生徒バックエンドは
+<code># LMP: 名前</code>・物体リスト・指示コメントだけからなる短い入力を、学習済みのモデルに渡します。LMP 側は、どちらのバックエンドが使われているかを区別しません。</p>
+
+<h2>4. 手法</h2>
+<h3>4.1 Gemini 版 CaP（教師）</h3>
+<p>davinci は「続きを書く」補完型でしたが、Gemini はチャット型なので、そのまま使うとコードブロックの記号・説明文・<code>import</code> 文などが出力に混ざります。
+そこで、<b>システム指示</b>で「コード補完エンジンとして、最後のコメントに対するコードだけを書く」ように指定し、さらに<b>後処理</b>（コードブロックの抽出・指示の繰り返しの除去・<code>import</code> 行の除去・stop トークンでの打ち切り）を加えて、元の CaP と同じ形の出力が得られるようにしました。</p>
+
+<h3>4.2 教師データの自動生成</h3>
+<p>指示文と、その指示が達成できたかを判定する関数を、シーンに合わせて自動で作る <b>9 種類のテンプレート</b>を実装しました。</p>
+<table>
+  <tr><th>テンプレート</th><th>指示の例</th><th>成功判定</th></tr>
+  <tr><td>block_on_bowl</td><td>put the red block on the blue bowl</td><td>ブロックがボウルの上にある</td></tr>
+  <tr><td>color_alias</td><td>put the sun-colored block on the blue bowl</td><td>色の言い換えを正しく解釈できたか</td></tr>
+  <tr><td>corner</td><td>move the red block to the top left corner</td><td>ブロックが角の付近にある</td></tr>
+  <tr><td>closest_bowl</td><td>put the red block in the bowl closest to it</td><td>最も近いボウルの上にある</td></tr>
+  <tr><td>extreme_block</td><td>put the left most block on the green bowl</td><td>一番端のブロックが置かれた</td></tr>
+  <tr><td>side_of</td><td>put the red block to the left of the blue bowl</td><td>ボウルの左／右 4cm 以上、上下のずれ 8cm 以内</td></tr>
+  <tr><td>stack</td><td>stack all the blocks on the green bowl</td><td>全ブロックがボウルの上に積まれた</td></tr>
+  <tr><td>matching</td><td>put the blocks in the bowls with matching colors</td><td>同じ色のペアがすべて揃った</td></tr>
+  <tr><td>count</td><td>how many blocks are there?</td><td>ロボットの発話に正しい数が含まれる</td></tr>
+</table>
+<p>seed からシーン（ブロック 2〜4 個・ボウル 1〜4 個）とタスクを作り、Gemini 版 CaP をシミュレーターで実行しました（150 エピソード）。<b>成功したエピソードのコードだけ</b>を教師データにしています。
+1 エピソードから <code>tabletop_ui</code>・<code>parse_obj_name</code>・<code>fgen</code> などの LMP 呼び出しが複数取れるので、それぞれを 1 サンプルにしました。</p>
+
+<h3>4.3 生徒の学習（LoRA による SFT）</h3>
+<table>
+  <tr><th>項目</th><th>設定</th></tr>
+  <tr><td>生徒モデル</td><td>Qwen2.5-Coder-7B-Instruct（A100、bf16）。T4 なら 1.5B を自動で選ぶ</td></tr>
+  <tr><td>LoRA</td><td>r = 16, α = 32, dropout = 0.05、対象は全線形層（q/k/v/o/gate/up/down_proj）</td></tr>
+  <tr><td>学習</td><td>3 エポック、学習率 2e-4（cosine）、実効バッチサイズ 16、最大長 2048 トークン、gradient checkpointing</td></tr>
+  <tr><td>損失</td><td>system・user 部分のラベルは −100 にして除外し、assistant（コード＋終了トークン）だけを学習</td></tr>
+  <tr><td>評価</td><td>学習に使っていない seed（100000 番台）30 エピソードで、全テンプレートの成功率と生成時間を測定</td></tr>
+</table>
+
+<h2>5. 工夫した点</h2>
+<ol>
+  <li><b>チャット型 LLM を補完型として使う</b>：システム指示と後処理の 2 段構えで、davinci 用の few-shot プロンプトを書き換えずに Gemini で動かしました。この後処理は生徒の出力にもそのまま使っています。</li>
+  <li><b>成功判定つきのタスク自動生成</b>：テンプレートごとに判定関数を用意したので、人がラベルを付けなくても「成功したコードだけ」を集められます。紛らわしい配置（最も近いボウルとの距離差が 3cm 未満など）は、判定がぶれないように生成の段階で除外しました。</li>
+  <li><b>長時間の自動実行に耐える安全装置</b>
+    <ul>
+      <li>生成コードが届かない座標を指定すると、元の環境は無限ループします。シミュレーションのステップ数に上限を設けて打ち切るようにしました（<code>SafePickPlaceEnv</code>）。</li>
+      <li>物体が多いと、元の配置処理は置き場所を探し続けて止まります。同じ乱数で配置を事前に試し、詰まる組み合わせは選び直すようにしました。</li>
+      <li>Gemini 無料枠のレート制限に合わせてリクエスト間隔を空け、429 / 5xx エラーは待ち時間を延ばしながら再試行します。1 日の上限に達したら安全に止まり、翌日に続きから再開できます（結果を JSONL に 1 件ずつ追記）。</li>
+    </ul></li>
+  <li><b>公平な比較とデータ分割</b>：同じ seed なら同じシーンになるので、教師と生徒を同じ条件で比較できます。検証データはエピソード単位で分け（seed が 10 の倍数）、同じシーンのサンプルが学習と検証の両方に入らないようにしました。<code>fgen</code> のように毎回同じ入力になる呼び出しは重複を除きました。</li>
+  <li><b>短い入力への置き換え</b>：生徒は few-shot 例を読まないので、教師と比べて入力が大幅に短くなります。教師では数千トークンあった入力が、数十〜数百トークンになります。</li>
+  <li><b>CPU / GPU ランタイムの分離</b>：API を待つだけのデータ作成は CPU ランタイムで、学習は GPU ランタイムで行い、結果は Google Drive で受け渡すようにして、GPU の利用時間を節約しました。</li>
+  <li><b>提出動画の自動作成</b>：学習済みのアダプタを読み込んでタスクを順に実行し、指示・生成コード・成否判定を映像に重ねて 1 本の動画にまとめるノートブック（<code>CaP_Student_Demo_Video.ipynb</code>）を作りました。</li>
+</ol>
+
+<h2>6. 結果</h2>
+<p class="small">※ Drive の <code>cap_distill/report/summary_exp1.md</code> などの数値を転記します。</p>
+<h3>6.1 教師データ</h3>
+<table>
+  <tr><th>項目</th><th>値</th></tr>
+  <tr><td>教師のエピソード数／成功率</td><td><span class="todo">［ 150 ／ ％ ］</span></td></tr>
+  <tr><td>学習データ／検証データ</td><td><span class="todo">［ 件 ／ 件 ］</span></td></tr>
+  <tr><td>学習時間／最終学習損失／検証損失</td><td><span class="todo">［ 分 ／ ／ ］</span></td></tr>
+</table>
+<h3>6.2 生徒と教師の比較（評価 30 エピソード）</h3>
+<table>
+  <tr><th></th><th>成功率</th><th>1 エピソードのコード生成時間</th><th>入力</th></tr>
+  <tr><td>教師（Gemini + few-shot）</td><td class="num"><span class="todo">［ ％ ］</span></td><td class="num"><span class="todo">［ 秒 ］</span></td><td>few-shot プロンプト全体</td></tr>
+  <tr><td>生徒（Qwen2.5-Coder + LoRA）</td><td class="num"><span class="todo">［ ％ ］</span></td><td class="num"><span class="todo">［ 秒 ］</span></td><td>LMP 名・物体リスト・指示のみ</td></tr>
+</table>
+<p>テンプレート別の成功率: <span class="todo">［ eval_by_template_exp1.png を貼る ］</span></p>
+
+<h2>7. 考察と今後の課題</h2>
+<p><span class="todo">［ 結果の数値を見てから記入：生徒が教師に近づけたテンプレート／苦手なテンプレートとその原因（失敗エピソードのエラー内容から）、速度の差 ］</span></p>
+<ul>
+  <li><b>汎化の限界</b>：生徒が覚えたのは、9 種類のテンプレートに沿った書き方です。「三角形に並べる」のように学習データに無い種類の指示は苦手だと考えられるので、動画の最後で学習外の指示を試しています。</li>
+  <li><b>データの多様化</b>：Gemini に指示文の言い換えを作らせたり、温度を上げて同じタスクを複数回解かせたりすれば、学習データの多様性を増やせます。</li>
+  <li><b>失敗データの活用</b>：今回は捨てた失敗エピソードを「悪い例」として、DPO などの選好学習に使えます。</li>
+</ul>
+
+<h2>8. 提出物の構成</h2>
+<table>
+  <tr><th>ファイル</th><th>内容</th></tr>
+  <tr><td>Code_as_Policies_Interactive_Demo.ipynb</td><td>公式デモ（参照用・OpenAI 版）</td></tr>
+  <tr><td>Code_as_Policies_Gemini_JP.ipynb</td><td>Gemini API 版 CaP（日本語解説つき）</td></tr>
+  <tr><td>CaP_Distillation_Gemini_Teacher_JP.ipynb</td><td>教師データ作成・LoRA 学習・評価・結果のまとめ</td></tr>
+  <tr><td>CaP_Student_Demo_Video.ipynb</td><td>学習済み生徒モデルによる実行と提出動画の作成</td></tr>
+</table>
+
+<h2>参考文献</h2>
+<p class="small">
+[1] J. Liang et al., “Code as Policies: Language Model Programs for Embodied Control,” ICRA 2023. https://code-as-policies.github.io/<br>
+[2] E. J. Hu et al., “LoRA: Low-Rank Adaptation of Large Language Models,” ICLR 2022.<br>
+[3] Qwen Team, “Qwen2.5-Coder Technical Report,” 2024.
+</p>
+</body>
+</html>
